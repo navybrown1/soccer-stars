@@ -497,28 +497,42 @@ const ball = {
   rotX: 0, rotY: 0
 };
 
-const you = {
-  x: W/2, y: H - 160, vx: 0, vy: 0,
-  r: 15, spd: 230, sprintSpd: 340,
-  fx: 0, fy: -1,
-  charge: 0, charging: false,
-  sprinting: false, sprintMeter: 100,
-  animFrame: 0, animTimer: 0,
-  powerupTimer: 0, powerupType: null
-};
+// Factory for outfield players
+function makePlayer(x, y, team, isHuman, number) {
+  return {
+    x, y, vx: 0, vy: 0,
+    r: 15, spd: 230, sprintSpd: 340,
+    fx: 0, fy: team === 'you' ? -1 : 1,
+    charge: 0, charging: false,
+    sprinting: false, sprintMeter: 100,
+    animFrame: 0, animTimer: 0,
+    powerupTimer: 0, powerupType: null,
+    team, isHuman, number,
+    state: 'defend', stateTimer: 0,
+    homeX: x, homeY: y
+  };
+}
 
-const aiD = {
-  x: W/2, y: 160, vx: 0, vy: 0,
-  r: 15, spd: 170,
-  fx: 0, fy: 1,
-  animFrame: 0, animTimer: 0,
-  state: 'defend', // defend | chase | dribble | shoot
-  stateTimer: 0,
-  powerupTimer: 0, powerupType: null
-};
+// Player team: 1 human + 2 AI teammates (bottom half)
+const you = makePlayer(W/2, H - 160, 'you', true, 7);
+const youMates = [
+  makePlayer(W/2 - 140, H - 200, 'you', false, 10),
+  makePlayer(W/2 + 140, H - 200, 'you', false, 11)
+];
 
-const aiG = { x: W/2, y: F.gT.y + 28, r: 12, spd: 240, tx: W/2 };
-const youG = { x: W/2, y: F.gB.y - 28, r: 12, spd: 240, tx: W/2 };
+// AI team: 3 AI defenders (top half)
+const aiTeam = [
+  makePlayer(W/2, 160, 'ai', false, 9),
+  makePlayer(W/2 - 130, 220, 'ai', false, 8),
+  makePlayer(W/2 + 130, 220, 'ai', false, 4)
+];
+
+// Goalies
+const aiG = { x: W/2, y: F.gT.y + 28, r: 12, spd: 240, tx: W/2, team: 'ai' };
+const youG = { x: W/2, y: F.gB.y - 28, r: 12, spd: 240, tx: W/2, team: 'you' };
+
+// All outfield players combined for easy iteration
+function allOutfield() { return [you, ...youMates, ...aiTeam]; }
 
 // ─── Input ────────────────────────────────────────────────
 const keys = {};
@@ -772,10 +786,13 @@ function goal(by) {
 
 function resetPos() {
   ball.x = W/2; ball.y = H/2; ball.z = 0; ball.vx = 0; ball.vy = 0; ball.vz = 0; ball.trail = []; ball.spin = 0;
-  you.x = W/2; you.y = H - 160; you.vx = 0; you.vy = 0; you.charge = 0; you.charging = false;
-  you.powerupType = null; you.powerupTimer = 0;
-  aiD.x = W/2; aiD.y = 160; aiD.vx = 0; aiD.vy = 0;
-  aiD.powerupType = null; aiD.powerupTimer = 0;
+  // Reset all outfield players to home positions
+  for (const p of allOutfield()) {
+    p.x = p.homeX; p.y = p.homeY; p.vx = 0; p.vy = 0;
+    p.charge = 0; p.charging = false;
+    p.powerupType = null; p.powerupTimer = 0;
+    p.state = 'defend'; p.stateTimer = 0;
+  }
   aiG.x = W/2; aiG.tx = W/2;
   youG.x = W/2; youG.tx = W/2;
   S.netBulgeTop = 0; S.netBulgeBottom = 0;
@@ -875,92 +892,115 @@ function chipBall(kicker) {
 }
 
 // ─── AI Defender (State Machine) ───────────────────────────
-function updateAI(dt) {
+// Generic AI for any non-human outfield player (teammates & opponents)
+function updateAIPlayer(p, dt) {
   // Power-up timers
-  if (aiD.powerupTimer > 0) {
-    aiD.powerupTimer -= dt;
-    if (aiD.powerupTimer <= 0) aiD.powerupType = null;
+  if (p.powerupTimer > 0) {
+    p.powerupTimer -= dt;
+    if (p.powerupTimer <= 0) p.powerupType = null;
   }
 
-  if (you.powerupType === 'freeze') {
-    aiD.vx = 0; aiD.vy = 0;
-    return; // Frozen!
+  // Freeze: AI team frozen when player has freeze powerup
+  if (p.team === 'ai' && you.powerupType === 'freeze') {
+    p.vx = 0; p.vy = 0;
+    return;
   }
 
-  const distToBall = d(aiD, ball);
+  const distToBall = d(p, ball);
   let tx, ty;
 
   // AI State Machine
-  aiD.stateTimer -= dt;
-  if (aiD.stateTimer <= 0) {
-    // Re-evaluate state
-    if (ball.y < H / 2) {
-      aiD.state = distToBall < 150 ? 'dribble' : 'chase';
+  p.stateTimer -= dt;
+  if (p.stateTimer <= 0) {
+    const ballInOwnHalf = (p.team === 'ai' && ball.y < H / 2) || (p.team === 'you' && ball.y > H / 2);
+    if (ballInOwnHalf) {
+      p.state = distToBall < 180 ? 'dribble' : 'chase';
     } else {
-      aiD.state = 'defend';
+      p.state = 'support';
     }
-    aiD.stateTimer = rand(0.5, 1.5);
+    p.stateTimer = rand(0.5, 1.5);
   }
 
-  // Difficulty multipliers
+  // Difficulty multipliers (only affect AI opponents, not teammates)
   let diffMultiplier = 1.0;
-  if (S.difficulty === 'easy') diffMultiplier = 0.75;
-  if (S.difficulty === 'hard') diffMultiplier = 1.15;
-  if (S.difficulty === 'legend') diffMultiplier = 1.3;
+  if (p.team === 'ai') {
+    if (S.difficulty === 'easy') diffMultiplier = 0.75;
+    if (S.difficulty === 'hard') diffMultiplier = 1.15;
+    if (S.difficulty === 'legend') diffMultiplier = 1.3;
+  } else {
+    diffMultiplier = 0.95; // teammates slightly slower than human
+  }
 
-  let currentSpd = aiD.spd * diffMultiplier;
-  if (aiD.powerupType === 'speed') currentSpd *= 1.4;
+  let currentSpd = p.spd * diffMultiplier;
+  if (p.powerupType === 'speed') currentSpd *= 1.4;
 
-  if (aiD.state === 'chase') {
+  // Target goal: AI attacks bottom, your team attacks top
+  const attackGoalY = p.team === 'ai' ? F.b : F.t;
+  const ownGoalY = p.team === 'ai' ? F.t : F.b;
+  const ownHalfMin = p.team === 'ai' ? F.t : H / 2;
+  const ownHalfMax = p.team === 'ai' ? H / 2 : F.b;
+
+  if (p.state === 'chase') {
     tx = ball.x;
     ty = ball.y;
-  } else if (aiD.state === 'dribble') {
-    // Dribble toward player's goal
+  } else if (p.state === 'dribble') {
     tx = ball.x;
     ty = ball.y;
   } else {
-    // Defend: stay between ball and own goal
-    tx = ball.x;
-    ty = F.t + 120;
+    // Support: spread out, stay between ball and attack goal
+    tx = ball.x + (p.homeX - W / 2) * 0.5;
+    ty = (p.homeY + ownGoalY) / 2;
   }
 
   // Jitter based on difficulty
-  const jitterAmount = S.difficulty === 'easy' ? 40 : (S.difficulty === 'medium' ? 20 : 5);
-  const jitter = Math.sin(Date.now() / 800 + aiD.x) * jitterAmount;
+  const jitterAmount = p.team === 'ai'
+    ? (S.difficulty === 'easy' ? 40 : (S.difficulty === 'medium' ? 20 : 5))
+    : 25;
+  const jitter = Math.sin(Date.now() / 800 + p.x) * jitterAmount;
   tx += jitter;
 
-  const ang = Math.atan2(ty - aiD.y, tx - aiD.x);
-  aiD.vx = Math.cos(ang) * currentSpd;
-  aiD.vy = Math.sin(ang) * currentSpd;
-  aiD.x += aiD.vx * dt;
-  aiD.y += aiD.vy * dt;
-  aiD.x = cl(aiD.x, F.l + aiD.r, F.r - aiD.r);
-  aiD.y = cl(aiD.y, F.t + aiD.r, H / 2 + 50);
-  aiD.fx = Math.cos(ang);
-  aiD.fy = Math.sin(ang);
+  const ang = Math.atan2(ty - p.y, tx - p.x);
+  p.vx = Math.cos(ang) * currentSpd;
+  p.vy = Math.sin(ang) * currentSpd;
+  p.x += p.vx * dt;
+  p.y += p.vy * dt;
+  p.x = cl(p.x, F.l + p.r, F.r - p.r);
+  // AI opponents stay in top half, teammates stay in bottom half
+  p.y = cl(p.y, ownHalfMin + p.r, ownHalfMax - p.r);
+  p.fx = Math.cos(ang);
+  p.fy = Math.sin(ang);
 
   // Kick ball
-  if (distToBall < aiD.r + ball.r + 6 && ball.z < 20) {
-    const p = 0.4 + Math.random() * 0.6;
+  if (distToBall < p.r + ball.r + 6 && ball.z < 20) {
+    const power = 0.4 + Math.random() * 0.6;
     let targetAngle;
-    
-    // Smart shooting: aim for corners of the goal
-    if (ball.y < H / 2 + 100) {
-      const targetX = Math.random() > 0.5 ? F.gB.l + 15 : F.gB.r - 15;
-      targetAngle = Math.atan2(F.b - aiD.y, targetX - aiD.x);
+
+    // Smart shooting: aim for corners of the attack goal
+    const attackGoalL = p.team === 'ai' ? F.gB.l : F.gT.l;
+    const attackGoalR = p.team === 'ai' ? F.gB.r : F.gT.r;
+    const ballNearAttackGoal = p.team === 'ai' ? ball.y > H / 2 + 100 : ball.y < H / 2 - 100;
+
+    if (ballNearAttackGoal) {
+      const targetX = Math.random() > 0.5 ? attackGoalL + 15 : attackGoalR - 15;
+      targetAngle = Math.atan2(attackGoalY - p.y, targetX - p.x);
     } else {
-      targetAngle = Math.atan2(F.b - aiD.y, (ball.x - aiD.x) * 0.5 + (Math.random() - 0.5) * 100);
+      targetAngle = Math.atan2(attackGoalY - p.y, (ball.x - p.x) * 0.5 + (Math.random() - 0.5) * 100);
     }
 
-    let sp = 200 + p * 400;
-    if (aiD.powerupType === 'supershot') sp *= 1.35;
+    let sp = 200 + power * 400;
+    if (p.powerupType === 'supershot') sp *= 1.35;
 
     ball.vx = Math.cos(targetAngle) * sp;
     ball.vy = Math.sin(targetAngle) * sp;
     ball.spin = (Math.random() - 0.5) * 200;
     playSound('kick');
-    spawnTouchParticles(ball.x, ball.y, aiD.powerupType === 'supershot' ? '#f97316' : '#fff', 8);
+    spawnTouchParticles(ball.x, ball.y, p.powerupType === 'supershot' ? '#f97316' : '#fff', 8);
   }
+}
+
+function updateAI(dt) {
+  for (const p of youMates) updateAIPlayer(p, dt);
+  for (const p of aiTeam) updateAIPlayer(p, dt);
 }
 
 // ─── Goalies ──────────────────────────────────────────────
