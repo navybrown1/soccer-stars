@@ -646,11 +646,16 @@ function updatePowerups(dt) {
       S.powerups.splice(i, 1);
       continue;
     }
-    // Check AI collision
-    if (d(aiD, p) < aiD.r + 15) {
-      applyPowerup(aiD, p.type);
-      S.powerups.splice(i, 1);
+    // Check AI team collision (all AI outfield players)
+    let aiHit = false;
+    for (const ap of aiTeam) {
+      if (d(ap, p) < ap.r + 15) {
+        applyPowerup(ap, p.type);
+        aiHit = true;
+        break;
+      }
     }
+    if (aiHit) { S.powerups.splice(i, 1); }
   }
 }
 
@@ -1187,21 +1192,23 @@ function drawField() {
   }
 }
 
-function drawPlayer(p, isHuman, dt) {
-  const team = TEAMS[isHuman ? S.teamYou : S.teamAi];
+function drawPlayer(p, dt) {
+  const isHumanTeam = p.team === 'you';
+  const team = TEAMS[isHumanTeam ? S.teamYou : S.teamAi];
 
-  // Shadow (scales down if player jumps, but players don't jump, only ball does)
+  // Shadow
   ctx.beginPath();
   ctx.ellipse(p.x + 2, p.y + 6, p.r, p.r * 0.45, 0, 0, Math.PI * 2);
   ctx.fillStyle = 'rgba(0,0,0,0.2)';
   ctx.fill();
 
   // Running animation bob
-  const bob = isHuman && (Math.abs(you.vx) > 10 || Math.abs(you.vy) > 10)
+  const bob = p.isHuman && (Math.abs(p.vx) > 10 || Math.abs(p.vy) > 10)
     ? Math.sin(p.animFrame * Math.PI / 2) * 2.5 : 0;
 
-  // Frozen effect
-  if (!isHuman && you.powerupType === 'freeze') {
+  // Frozen effect (AI team only, when human has freeze powerup)
+  const frozen = !isHumanTeam && you.powerupType === 'freeze';
+  if (frozen) {
     ctx.shadowColor = '#22d3ee';
     ctx.shadowBlur = 15;
   } else {
@@ -1214,7 +1221,7 @@ function drawPlayer(p, isHuman, dt) {
   ctx.arc(p.x, p.y + bob, p.r, 0, Math.PI * 2);
   const grad = ctx.createRadialGradient(p.x - 3, p.y - 3 + bob, 0, p.x, p.y + bob, p.r);
   
-  if (!isHuman && you.powerupType === 'freeze') {
+  if (frozen) {
     grad.addColorStop(0, '#99f6e4');
     grad.addColorStop(1, '#0891b2');
   } else {
@@ -1243,14 +1250,14 @@ function drawPlayer(p, isHuman, dt) {
   ctx.fillStyle = team.text;
   ctx.font = 'bold 12px sans-serif';
   ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(isHuman ? '7' : '9', p.x, p.y + 1 + bob);
+  ctx.fillText(p.number, p.x, p.y + 1 + bob);
 
   // Direction arrow
   const len = p.r + 6;
   ctx.beginPath();
   ctx.moveTo(p.x, p.y + bob);
   ctx.lineTo(p.x + p.fx * len, p.y + p.fy * len + bob);
-  ctx.strokeStyle = isHuman ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.5)';
+  ctx.strokeStyle = isHumanTeam ? 'rgba(255,255,255,0.7)' : 'rgba(255,255,255,0.5)';
   ctx.lineWidth = 2.5;
   ctx.stroke();
 
@@ -1550,8 +1557,7 @@ function loop(time) {
   drawPowerups();
   drawGoalie(aiG, false);
   drawGoalie(youG, true);
-  drawPlayer(aiD, false, dt);
-  drawPlayer(you, true, dt);
+  for (const p of allOutfield()) drawPlayer(p, dt);
   drawBall();
   drawKickIndicator();
   drawParticles();
